@@ -1,0 +1,19 @@
+{{- if gt (len .) 0 }}
+{{- range $entryPoint, $diffMap := . }}
+**Changes detected** 
+<details>
+    <summary>{{ $entryPoint }}</summary>
+{{- range $path, $diff := $diffMap }}
+
+**{{ $path }}**
+
+```diff
+{{ $diff }}
+```
+{{- end }}
+</details>
+
+{{- end }}
+{{- else }}
+**No Changes Detected**
+{{- end }}
