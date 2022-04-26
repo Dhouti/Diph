@@ -1,0 +1,87 @@
+name: diph
+on: pull_request
+jobs:
+  diph:
+    env:
+      KUSTOMIZE_VERSION: 0.0.0
+      DYFF_VERSION: 0.0.0
+      DIPH_VERSION: 0.0.0
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repo
+        uses: actions/checkout@v3
+        with:
+          path: old
+          ref: ${{ github.event.pull_request.base.sha }}
+
+      - name: Checkout Repo
+        uses: actions/checkout@v3
+        with:
+          path: new
+
+      - name: Cache Tools
+        uses: actions/cache@v3
+        with:
+          path: |
+            tools
+          key: ${{ env.KUSTOMIZE_VERSION }}-${{ env.DYFF_VERSION }}-${{ env.DIPH_VERSION }}
+
+      - name: Install Kustomize and Dyff
+        if: steps.cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          mkdir -p tools
+          export KUSTOMIZE_LINK="https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2Fv${KUSTOMIZE_VERSION}/kustomize_v${KUSTOMIZE_VERSION}_linux_amd64.tar.gz" 
+          wget "$KUSTOMIZE_LINK" -O tools/kustomize.tar.gz
+          export DYFF_LINK="https://github.com/homeport/dyff/releases/download/v${DYFF_VERSION}/dyff_${DYFF_VERSION}_linux_amd64.tar.gz"
+          wget "$DYFF_LINK" -O tools/dyff.tar.gz
+          export DIPH_LINK="https://github.com/Dhouti/Diph/releases/download/v${DIPH_VERSION}/Diph_${DIPH_VERSION}_linux_amd64.tar.gz"
+          wget "$DIPH_LINK" -O tools/diph.tar.gz
+          cd tools
+          tar -xzf kustomize.tar.gz
+          tar -xzf dyff.tar.gz
+          tar -xzf diph.tar.gz
+          cd ..
+          
+      - name: Diph
+        id: diph
+        shell: bash
+        run: |
+          export PATH=$(pwd)/tools/:$PATH
+          cat << EOF > config.yml
+          entryPoints:
+          - path: overlays/cluster-name/
+          EOF
+          
+          echo "diph_output<<EOF" >> $GITHUB_ENV
+          echo "$(Diph diff --config=config.yml)" >> $GITHUB_ENV
+          echo "EOF" >> $GITHUB_ENV
+      
+
+      - uses: actions/github-script@v5
+        with:
+          script: |
+            // Get the existing comments.
+            const {data: comments} = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.number,
+            })
+            // Find any comment already made by the bot.                                                                                                    
+            const botComment = comments.find(comment => comment.user.id === 41898282)                                                                       
+            const commentBody = process.env.diph_output
+            if (botComment) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: botComment.id,
+                body: commentBody
+              })
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.payload.number,
+                body: commentBody
+              })
+            }
