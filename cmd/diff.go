@@ -169,7 +169,6 @@ func dyffExpandedTree(firstTree *GitopsNode, secondTree *GitopsNode) (map[string
 				matchedPaths = append(matchedPaths, firstChild.Path)
 				goCount += 1
 				go func(firstChild *GitopsNode, secondChild *GitopsNode) {
-					fmt.Println(firstChild.Path, secondChild.Path)
 					dyffOutput, err := dyffKustomize(firstChild.Bytes, secondChild.Bytes)
 					if err != nil {
 						panic(err)
