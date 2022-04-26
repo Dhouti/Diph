@@ -21,16 +21,18 @@ import (
 	"text/template"
 	"github.com/spf13/viper"
 	"github.com/Masterminds/sprig"
-	"sync"
 
 	kustomizev1beta1 "github.com/fluxcd/kustomize-controller/api/v1beta1"
 	kustomizev1beta2 "github.com/fluxcd/kustomize-controller/api/v1beta2"
+	applicationv1alpha1 "github.com/argoproj/argo-cd/v2/pkg/apis/application/v1alpha1"
 	flag "github.com/spf13/pflag"
 	_ "embed"
 )
 
 //go:embed templates/github-action
 var githubActionRawTemplate string
+
+var cfgFile string
 
 type GitopsNode struct {
 	Path string
@@ -40,19 +42,22 @@ type GitopsNode struct {
 
 type Entrypoint struct {
 	Path string
-	Ignores []string
 }
 
 func newEntrypoint(v *viper.Viper) *Entrypoint {
 	return &Entrypoint{
 		Path: v.GetString("path"),
-		Ignores: v.GetStringSlice("ignores"),
 	}
 }
 
 type DiffMap struct {
 	Path string
 	Diff map[string]string
+}
+
+type Diff struct {
+	Path string
+	DiffOutput []byte
 }
 
 // diffCmd represents the diff command
@@ -71,9 +76,9 @@ var diffCmd = &cobra.Command{
 			entryPoints = append(entryPoints, newEntrypoint(viper.Sub(viperSubAddress)))
 		}
 
+		var goCount int
 		allDiffsMap := map[string]map[string]string{}
 		diffMaps := make(chan *DiffMap)
-		var wg sync.WaitGroup
 		for _, entryPoint := range entryPoints {
 			currentEntryPoint := entryPoint
 			firstEntrypointRoot := "old/"
@@ -82,24 +87,14 @@ var diffCmd = &cobra.Command{
 			firstEntrypoint := entryPoint.Path	
 			secondEntrypoint := entryPoint.Path
 
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				firstEntrypointOutput, err := buildKustomizeWithPath(firstEntrypointRoot, firstEntrypoint)
-				if err != nil {
-					panic(err)
-				}
-				
-				firstExpanded, err := expandEntrypoint(firstEntrypointOutput.Bytes(), firstEntrypointRoot, currentEntryPoint.Ignores)
+			goCount += 1
+			go func(firstEntrypointRoot string, secondEntrypointRoot string, firstEntrypoint string, secondEntrypoint string) {
+				firstExpanded, _, err := expandEntrypoint(firstEntrypointRoot, firstEntrypoint, []string{})
 				if err != nil {
 					panic(err)
 				}
 
-				secondEntrypointOutput, err := buildKustomizeWithPath(secondEntrypointRoot, secondEntrypoint)
-				if err != nil {
-					panic(err)
-				}
-				secondExpanded, err := expandEntrypoint(secondEntrypointOutput.Bytes(), secondEntrypointRoot, currentEntryPoint.Ignores)
+				secondExpanded, _, err := expandEntrypoint(secondEntrypointRoot, secondEntrypoint, []string{})
 				if err != nil {
 					panic(err)
 				}
@@ -110,6 +105,7 @@ var diffCmd = &cobra.Command{
 				if err != nil {
 					panic(err)
 				}
+
 				diffMap[firstEntrypoint] = string(dyffOutput.Bytes())
 				childDiffMap, err := dyffExpandedTree(firstExpanded, secondExpanded)
 				if err != nil {
@@ -122,15 +118,15 @@ var diffCmd = &cobra.Command{
 					Path: currentEntryPoint.Path,
 					Diff: childDiffMap,
 				}
-			}()
+			}(firstEntrypointRoot, secondEntrypointRoot, firstEntrypoint, secondEntrypoint)
 		}
-		for i := 0; i < len(entryPoints); i++ {
+
+		for i := 0; i < goCount; i++ {
 			currentDiffMap := <-diffMaps
 			if len(currentDiffMap.Diff) > 0 {
 				allDiffsMap[currentDiffMap.Path] = currentDiffMap.Diff
 			}
 		}
-		wg.Wait()
 
 		githubActionTemplate := template.Must(template.New("github-action").Funcs(sprig.TxtFuncMap()).Parse(githubActionRawTemplate))
 		err := githubActionTemplate.Execute(os.Stdout, allDiffsMap)
@@ -140,60 +136,65 @@ var diffCmd = &cobra.Command{
 	},
 }
 
-var ignoredPathFlag []string
 func init() {
-	var cfgFile string
-	flag.StringArrayVar(&ignoredPathFlag, "ignore", []string{}, "Relative directory paths that should not be expanded.")
+	cobra.OnInitialize(initConfig)
 	flag.StringVar(&cfgFile, "config", "config.yml", "The path to the config file to be used.")
 
+	kustomizev1beta1.AddToScheme(scheme.Scheme)
+	kustomizev1beta2.AddToScheme(scheme.Scheme)
+	applicationv1alpha1.AddToScheme(scheme.Scheme)
+
+	rootCmd.AddCommand(diffCmd)
+}
+
+func initConfig() {
 	viper.SetConfigType("yaml")
 	viper.SetConfigFile(cfgFile)
 	err := viper.ReadInConfig() 
 	if err != nil {
 		panic(fmt.Errorf("Fatal error config file: %w \n", err))
 	}
-
-	kustomizev1beta1.AddToScheme(scheme.Scheme)
-	kustomizev1beta2.AddToScheme(scheme.Scheme)
-	rootCmd.AddCommand(diffCmd)
-
-	// Here you will define your flags and configuration settings.
-
-	// Cobra supports Persistent Flags which will work for this command
-	// and all subcommands, e.g.:
-	// diffCmd.PersistentFlags().String("foo", "", "A help for foo")
-
-	// Cobra supports local flags which will only run when this command
-	// is called directly, e.g.:
-	// diffCmd.Flags().BoolP("toggle", "t", false, "Help message for toggle")
 }
+
 
 func dyffExpandedTree(firstTree *GitopsNode, secondTree *GitopsNode) (map[string]string, error) {
 	diffMap := map[string]string{}
 	var matchedPaths []string
+
+	var goCount int
+	diffs := make(chan *Diff)
 	for _, firstChild := range firstTree.Children {
 		for count, secondChild := range secondTree.Children {
 			if firstChild.Path == secondChild.Path {
 				matchedPaths = append(matchedPaths, firstChild.Path)
-				dyffOutput, err := dyffKustomize(firstChild.Bytes, secondChild.Bytes)
-				if err != nil {
-					panic(err)
-				}
-				if len(dyffOutput.Bytes()) > 1 {
-					diffMap[firstChild.Path] = string(dyffOutput.Bytes())
-				}
+				goCount += 1
+				go func(firstChild *GitopsNode, secondChild *GitopsNode) {
+					fmt.Println(firstChild.Path, secondChild.Path)
+					dyffOutput, err := dyffKustomize(firstChild.Bytes, secondChild.Bytes)
+					if err != nil {
+						panic(err)
+					}
+					diffs <- &Diff{
+						Path: firstChild.Path,
+						DiffOutput: dyffOutput.Bytes(),
+					}
+				}(firstChild, secondChild)
 				break
 			}
 			// If we didn't find the firstChild path compare against an empty file, catches deletions
 			if count == len(secondTree.Children) + 1 {
 				matchedPaths = append(matchedPaths, firstChild.Path)
-				dyffOutput, err := dyffKustomize(firstChild.Bytes, []byte{})
-				if err != nil {
-					panic(err)
-				}
-				if len(dyffOutput.Bytes()) > 1 {
-					diffMap[firstChild.Path] = string(dyffOutput.Bytes())
-				}
+				goCount += 1
+				go func(secondChild *GitopsNode) {
+					dyffOutput, err := dyffKustomize(firstChild.Bytes, []byte{})
+					if err != nil {
+						panic(err)
+					}
+					diffs <- &Diff{
+						Path: firstChild.Path,
+						DiffOutput: dyffOutput.Bytes(),
+					}
+				}(secondChild)
 			}
 		}
 	}
@@ -211,11 +212,23 @@ func dyffExpandedTree(firstTree *GitopsNode, secondTree *GitopsNode) (map[string
 			skip = false
 			continue
 		}
-		dyffOutput, err := dyffKustomize([]byte{}, secondChild.Bytes)
-		if err != nil {
-			panic(err)
+		goCount += 1
+		go func(secondChild *GitopsNode) {
+			dyffOutput, err := dyffKustomize([]byte{}, secondChild.Bytes)
+			if err != nil {
+				panic(err)
+			}
+			diffs <- &Diff{
+				Path: secondChild.Path,
+				DiffOutput: dyffOutput.Bytes(),
+			}
+		}(secondChild)
+	}
+	for i := 0; i < goCount; i++ {
+		diff := <-diffs
+		if len(diff.DiffOutput) > 1 {
+			diffMap[diff.Path] = string(diff.DiffOutput)
 		}
-		diffMap[secondChild.Path] = string(dyffOutput.Bytes())
 	}
 	return diffMap, nil
 }
@@ -299,14 +312,21 @@ func writeBytesToTempfile(inBytes []byte) (*os.File, error) {
 	return tempFile, nil
 }
 
-func expandEntrypoint(entrypoint []byte, kustomizePathRoot string, ignoredPaths []string) (*GitopsNode, error) {
+func expandEntrypoint(kustomizePathRoot string, kustomizePath string, processedPaths []string) (*GitopsNode, []string, error) {
+	entrypointOutput, err := buildKustomizeWithPath(kustomizePathRoot, kustomizePath)
+	if err != nil {
+		fmt.Println("failed to build")
+		return nil, []string{}, err
+	}
+
 	currentNode := &GitopsNode{
 		Children: []*GitopsNode{},
-		Bytes: entrypoint,
+		Bytes: entrypointOutput.Bytes(),
 	}
-	allDocuments, err := splitDocuments(entrypoint)
+
+	allDocuments, err := splitDocuments(entrypointOutput.Bytes())
 	if err != nil {
-		return nil, err
+		return nil, []string{}, err
 	}
 	for _, document := range allDocuments {
 		var nextPath *string
@@ -315,21 +335,35 @@ func expandEntrypoint(entrypoint []byte, kustomizePathRoot string, ignoredPaths 
 		if err != nil {
 			continue
 		}
-		if m.GetObjectKind().GroupVersionKind().Kind == "Kustomization" {
-			if m.GetObjectKind().GroupVersionKind().Version == "v1beta1" {
+
+		objectGVK := m.GetObjectKind().GroupVersionKind()
+		if objectGVK.Kind == "Kustomization" {
+			if objectGVK.Version == "v1beta1" {
 				fluxKustomization, ok := m.(*kustomizev1beta1.Kustomization)
 				if !ok {
-					panic(errors.New("Kustomize v1beta1 detected but cannot be parsed"))
+					panic(errors.New("Flux2 Kustomization v1beta1 detected but cannot be parsed"))
 				}
 				nextPath = &fluxKustomization.Spec.Path
-			} else if m.GetObjectKind().GroupVersionKind().Version == "v1beta2" {
+			} else if objectGVK.Version == "v1beta2" {
 				fluxKustomization, ok := m.(*kustomizev1beta2.Kustomization)
 				if !ok {
-					panic(errors.New("Kustomize v1beta2 detected but cannot be parsed"))
+					panic(errors.New("Flux2 Kustomization v1beta2 detected but cannot be parsed"))
 				}
 				nextPath = &fluxKustomization.Spec.Path
 			} else {
-				panic(errors.New("Kustomize detected but cannot be parsed"))
+				panic(errors.New("Kustomization detected but cannot be parsed"))
+			}
+		} else if objectGVK.Kind == "Application" {
+			if objectGVK.Version == "v1alpha1" {
+				argocdApplication, ok := m.(*applicationv1alpha1.Application)
+				if !ok {
+					panic(errors.New("ArgoCD Application v1alpha1 detected but cannot be parsed"))
+				}
+				if argocdApplication.Spec.Source.Path != "" {
+					nextPath = &argocdApplication.Spec.Source.Path
+				}
+			} else {
+				panic(errors.New("ArgoCD Application detected but cannot be parsed"))
 			}
 		}
 
@@ -337,30 +371,32 @@ func expandEntrypoint(entrypoint []byte, kustomizePathRoot string, ignoredPaths 
 		if nextPath == nil {
 			continue
 		}
-		var pathIsIgnored bool
-		for _, ignoredPath := range ignoredPaths {
-			if *nextPath == ignoredPath {
-				pathIsIgnored = true
+
+		// Prevent infinite recursion
+		var pathIsProcessed bool
+		for _, processedPath := range processedPaths {
+			if *nextPath == processedPath {
+				pathIsProcessed = true
 			}
 		}
 
-		if !pathIsIgnored {
-			entrypointOutput, err := buildKustomizeWithPath(kustomizePathRoot, *nextPath)
-			if err != nil {
-				fmt.Println("failed to build")
-				return nil, err
-			}
-			entrypointExpanded, err := expandEntrypoint(entrypointOutput.Bytes(), kustomizePathRoot, ignoredPaths)
+		if !pathIsProcessed {
+			// Add self to block list for next run
+			processedPaths = append(processedPaths, *nextPath)
+			entrypointExpanded, newProcessedPaths, err := expandEntrypoint(kustomizePathRoot, *nextPath, processedPaths)
 			if err != nil {
 				fmt.Println("Failed to expand")
-				return nil, err
+				return nil, []string{}, err
 			}
 			entrypointExpanded.Path = *nextPath
 			currentNode.Children = append(currentNode.Children, entrypointExpanded)
+
+			// Add all processed paths to block list
+			processedPaths = append(processedPaths, newProcessedPaths...)
 		}
 	}
 	
-	return currentNode, nil
+	return currentNode, []string{}, nil
 }
 
 func splitDocuments(documents []byte) ([][]byte, error) {

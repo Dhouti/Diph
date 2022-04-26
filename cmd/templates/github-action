@@ -12,8 +12,7 @@
 ```
 {{- end }}
 </details>
-
-{{- end }}
+{{ end }}
 {{- else }}
 **No Changes Detected**
 {{- end }}
