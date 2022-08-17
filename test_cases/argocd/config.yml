@@ -1,0 +1,3 @@
+entryPoints:
+- path: kustomize/clusters/cluster_0/
+- path: kustomize/clusters/cluster_1/
