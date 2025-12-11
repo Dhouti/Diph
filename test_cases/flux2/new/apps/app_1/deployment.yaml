@@ -16,3 +16,6 @@ spec:
       containers:
         - name: app_1
           image: nginx
+          env:
+          - name: ENV_VAR
+            value: "app_1"

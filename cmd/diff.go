@@ -1,32 +1,33 @@
 /*
-Copyright © 2022 NAME HERE <EMAIL ADDRESS>
-
+Copyright © 2022 Dhouti
 */
 package cmd
 
 import (
-	"path/filepath"
-	"io"
-	"os"
-	"fmt"
-	"errors"
-	"github.com/spf13/cobra"
 	"bytes"
+	"errors"
+	"fmt"
+	"io"
+	"maps"
+	"os"
 	"os/exec"
-	"io/ioutil"
-	"gopkg.in/yaml.v3"
-	"k8s.io/client-go/kubernetes/scheme"
-	"golang.org/x/exp/maps"
+	"path/filepath"
 	"strings"
 	"text/template"
-	"github.com/spf13/viper"
-	"github.com/Masterminds/sprig"
 
-	kustomizev1beta1 "github.com/fluxcd/kustomize-controller/api/v1beta1"
-	kustomizev1beta2 "github.com/fluxcd/kustomize-controller/api/v1beta2"
-	applicationv1alpha1 "github.com/argoproj/argo-cd/v2/pkg/apis/application/v1alpha1"
-	flag "github.com/spf13/pflag"
+	"github.com/Masterminds/sprig"
+	"github.com/spf13/cobra"
+	"github.com/spf13/viper"
+	"gopkg.in/yaml.v3"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/serializer"
+
 	_ "embed"
+
+	kustomizev1 "github.com/fluxcd/kustomize-controller/api/v1"
+	kustomizev1beta2 "github.com/fluxcd/kustomize-controller/api/v1beta2"
+	flag "github.com/spf13/pflag"
+	kubernetesscheme "k8s.io/client-go/kubernetes/scheme"
 )
 
 //go:embed templates/github-action
@@ -35,9 +36,9 @@ var githubActionRawTemplate string
 var cfgFile string
 
 type GitopsNode struct {
-	Path string
+	Path     string
 	Children []*GitopsNode
-	Bytes []byte
+	Bytes    []byte
 }
 
 type Entrypoint struct {
@@ -56,7 +57,7 @@ type DiffMap struct {
 }
 
 type Diff struct {
-	Path string
+	Path       string
 	DiffOutput []byte
 }
 
@@ -64,7 +65,7 @@ type Diff struct {
 var diffCmd = &cobra.Command{
 	Use:   "diff",
 	Short: "aaaaaa",
-	Long: `aaaaaaaaaaa`,
+	Long:  `aaaaaaaaaaa`,
 	Args: func(cmd *cobra.Command, args []string) error {
 		return nil
 	},
@@ -84,7 +85,7 @@ var diffCmd = &cobra.Command{
 			firstEntrypointRoot := "old/"
 			secondEntrypointRoot := "new/"
 
-			firstEntrypoint := entryPoint.Path	
+			firstEntrypoint := entryPoint.Path
 			secondEntrypoint := entryPoint.Path
 
 			goCount += 1
@@ -136,13 +137,17 @@ var diffCmd = &cobra.Command{
 	},
 }
 
+var scheme *runtime.Scheme
+
 func init() {
 	cobra.OnInitialize(initConfig)
 	flag.StringVar(&cfgFile, "config", "config.yml", "The path to the config file to be used.")
 
-	kustomizev1beta1.AddToScheme(scheme.Scheme)
-	kustomizev1beta2.AddToScheme(scheme.Scheme)
-	applicationv1alpha1.AddToScheme(scheme.Scheme)
+	scheme = runtime.NewScheme()
+
+	kubernetesscheme.AddToScheme(scheme)
+	kustomizev1.AddToScheme(scheme)
+	kustomizev1beta2.AddToScheme(scheme)
 
 	rootCmd.AddCommand(diffCmd)
 }
@@ -150,12 +155,11 @@ func init() {
 func initConfig() {
 	viper.SetConfigType("yaml")
 	viper.SetConfigFile(cfgFile)
-	err := viper.ReadInConfig() 
+	err := viper.ReadInConfig()
 	if err != nil {
 		panic(fmt.Errorf("Fatal error config file: %w \n", err))
 	}
 }
-
 
 func dyffExpandedTree(firstTree *GitopsNode, secondTree *GitopsNode) (map[string]string, error) {
 	diffMap := map[string]string{}
@@ -174,14 +178,14 @@ func dyffExpandedTree(firstTree *GitopsNode, secondTree *GitopsNode) (map[string
 						panic(err)
 					}
 					diffs <- &Diff{
-						Path: firstChild.Path,
+						Path:       firstChild.Path,
 						DiffOutput: dyffOutput.Bytes(),
 					}
 				}(firstChild, secondChild)
 				break
 			}
 			// If we didn't find the firstChild path compare against an empty file, catches deletions
-			if count == len(secondTree.Children) + 1 {
+			if count == len(secondTree.Children)+1 {
 				matchedPaths = append(matchedPaths, firstChild.Path)
 				goCount += 1
 				go func(secondChild *GitopsNode) {
@@ -190,7 +194,7 @@ func dyffExpandedTree(firstTree *GitopsNode, secondTree *GitopsNode) (map[string
 						panic(err)
 					}
 					diffs <- &Diff{
-						Path: firstChild.Path,
+						Path:       firstChild.Path,
 						DiffOutput: dyffOutput.Bytes(),
 					}
 				}(secondChild)
@@ -218,7 +222,7 @@ func dyffExpandedTree(firstTree *GitopsNode, secondTree *GitopsNode) (map[string
 				panic(err)
 			}
 			diffs <- &Diff{
-				Path: secondChild.Path,
+				Path:       secondChild.Path,
 				DiffOutput: dyffOutput.Bytes(),
 			}
 		}(secondChild)
@@ -298,9 +302,8 @@ func dyffKustomize(oldBytes []byte, newBytes []byte) (*bytes.Buffer, error) {
 	return stdOut, nil
 }
 
-
 func writeBytesToTempfile(inBytes []byte) (*os.File, error) {
-	tempFile, err := ioutil.TempFile("", "DiphTempFile.*.yml")
+	tempFile, err := os.CreateTemp("", "DiphTempFile.*.yml")
 	if err != nil {
 		return nil, err
 	}
@@ -320,7 +323,7 @@ func expandEntrypoint(kustomizePathRoot string, kustomizePath string, processedP
 
 	currentNode := &GitopsNode{
 		Children: []*GitopsNode{},
-		Bytes: entrypointOutput.Bytes(),
+		Bytes:    entrypointOutput.Bytes(),
 	}
 
 	allDocuments, err := splitDocuments(entrypointOutput.Bytes())
@@ -330,39 +333,29 @@ func expandEntrypoint(kustomizePathRoot string, kustomizePath string, processedP
 	for _, document := range allDocuments {
 		var nextPath *string
 		// Convert manifest to runtime.Object
-		m, _, err := scheme.Codecs.UniversalDeserializer().Decode(document, nil, nil)
+
+		decoder := serializer.NewCodecFactory(scheme).UniversalDeserializer()
+		obj, gvk, err := decoder.Decode(document, nil, nil)
 		if err != nil {
-			continue
+			panic(err)
 		}
 
-		objectGVK := m.GetObjectKind().GroupVersionKind()
-		if objectGVK.Kind == "Kustomization" {
-			if objectGVK.Version == "v1beta1" {
-				fluxKustomization, ok := m.(*kustomizev1beta1.Kustomization)
+		if gvk.Kind == "Kustomization" {
+			if gvk.Version == "v1" {
+				fluxKustomization, ok := obj.(*kustomizev1.Kustomization)
 				if !ok {
-					panic(errors.New("Flux2 Kustomization v1beta1 detected but cannot be parsed"))
+					panic(errors.New("Flux2 Kustomization v1 detected but cannot be parsed"))
 				}
 				nextPath = &fluxKustomization.Spec.Path
-			} else if objectGVK.Version == "v1beta2" {
-				fluxKustomization, ok := m.(*kustomizev1beta2.Kustomization)
+			} else if gvk.Version == "v1beta2" {
+				fluxKustomization, ok := obj.(*kustomizev1beta2.Kustomization)
 				if !ok {
 					panic(errors.New("Flux2 Kustomization v1beta2 detected but cannot be parsed"))
 				}
 				nextPath = &fluxKustomization.Spec.Path
+				fmt.Println(fluxKustomization.Spec.Path)
 			} else {
 				panic(errors.New("Kustomization detected but cannot be parsed"))
-			}
-		} else if objectGVK.Kind == "Application" {
-			if objectGVK.Version == "v1alpha1" {
-				argocdApplication, ok := m.(*applicationv1alpha1.Application)
-				if !ok {
-					panic(errors.New("ArgoCD Application v1alpha1 detected but cannot be parsed"))
-				}
-				if argocdApplication.Spec.Source.Path != "" {
-					nextPath = &argocdApplication.Spec.Source.Path
-				}
-			} else {
-				panic(errors.New("ArgoCD Application detected but cannot be parsed"))
 			}
 		}
 
@@ -394,30 +387,30 @@ func expandEntrypoint(kustomizePathRoot string, kustomizePath string, processedP
 			processedPaths = append(processedPaths, newProcessedPaths...)
 		}
 	}
-	
+
 	return currentNode, []string{}, nil
 }
 
 func splitDocuments(documents []byte) ([][]byte, error) {
 	reader := bytes.NewReader(documents)
-    dec := yaml.NewDecoder(reader)
+	dec := yaml.NewDecoder(reader)
 
 	var splitDocuments [][]byte
-    for {
-        var node yaml.Node
-        err := dec.Decode(&node)
-        if errors.Is(err, io.EOF) {
-            break
-        }
-        if err != nil {
-            return splitDocuments, err
-        }
+	for {
+		var node yaml.Node
+		err := dec.Decode(&node)
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return splitDocuments, err
+		}
 
-        content, err := yaml.Marshal(&node)
-        if err != nil {
-            return splitDocuments, err
-        }
+		content, err := yaml.Marshal(&node)
+		if err != nil {
+			return splitDocuments, err
+		}
 		splitDocuments = append(splitDocuments, content)
-    }
+	}
 	return splitDocuments, nil
 }
