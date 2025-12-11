@@ -335,7 +335,7 @@ func expandEntrypoint(kustomizePathRoot string, kustomizePath string, processedP
 		decoder := serializer.NewCodecFactory(scheme).UniversalDeserializer()
 		obj, gvk, err := decoder.Decode(document, nil, nil)
 		if err != nil {
-			// This is a kind we don't care about, skip
+			// This is not a kustomization file
 			continue
 		}
 
@@ -352,7 +352,6 @@ func expandEntrypoint(kustomizePathRoot string, kustomizePath string, processedP
 					panic(errors.New("Flux2 Kustomization v1beta2 detected but cannot be parsed"))
 				}
 				nextPath = &fluxKustomization.Spec.Path
-				fmt.Println(fluxKustomization.Spec.Path)
 			} else {
 				panic(errors.New("Kustomization detected but cannot be parsed"))
 			}
