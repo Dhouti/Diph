@@ -27,7 +27,6 @@ import (
 	kustomizev1 "github.com/fluxcd/kustomize-controller/api/v1"
 	kustomizev1beta2 "github.com/fluxcd/kustomize-controller/api/v1beta2"
 	flag "github.com/spf13/pflag"
-	kubernetesscheme "k8s.io/client-go/kubernetes/scheme"
 )
 
 //go:embed templates/github-action
@@ -145,7 +144,6 @@ func init() {
 
 	scheme = runtime.NewScheme()
 
-	kubernetesscheme.AddToScheme(scheme)
 	kustomizev1.AddToScheme(scheme)
 	kustomizev1beta2.AddToScheme(scheme)
 
@@ -337,7 +335,8 @@ func expandEntrypoint(kustomizePathRoot string, kustomizePath string, processedP
 		decoder := serializer.NewCodecFactory(scheme).UniversalDeserializer()
 		obj, gvk, err := decoder.Decode(document, nil, nil)
 		if err != nil {
-			panic(err)
+			// This is a kind we don't care about, skip
+			continue
 		}
 
 		if gvk.Kind == "Kustomization" {
